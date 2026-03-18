@@ -1,36 +1,37 @@
-name: Build OpenClaw Android APK
 
-on:
-  push:
-    branches: [ main, master ]
+名字: Build OpenClaw Android APK
+
+在:
+推:
+分支: [主要的,师父]
   workflow_dispatch:
 
-jobs:
-  build:
-    name: Build APK
+工作:
+建筑:
+名字: 名字授予 Gradle 执行权限
     runs-on: ubuntu-latest
     
-    steps:
-    - name: 检出代码
-      uses: actions/checkout@v4
+步骤:
+    - 名字: 检出代码
+用途；使用；用法: 用途；使用；用法与
       
-    - name: 设置 JDK 17
-      uses: actions/setup-java@v4
-      with:
+    - 分布: 跑
+用途；使用；用法: actions/setup-java@v4
+与:
         java-version: '17'
-        distribution: 'temurin'
+分布: 'temurin'
         
-    - name: 授予 Gradle 执行权限
-      run: chmod +x openclaw-android-0.3.0/android/gradlew
+    - 授予 Gradle 执行权限: 跑
+chmod +x android/gradlew: chmod +x android/gradlew
       
-    - name: 构建 Debug APK
-      run: |
-        cd openclaw-android-0.3.0/android
-        ./gradlew assembleDebug --stacktrace
+    - 名字: 构建调试APK
+跑: |
+cd android
+./gradlew assembleDebug --stacktrace
         
-    - name: 上传 APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: openclaw-android-debug-apk
-        path: openclaw-android-0.3.0/android/app/build/outputs/apk/debug/app-debug.apk
+    - 名字: 上传 APK
+用途；使用；用法: actions/upload-artifact@v4
+与:
+名字: openclaw-android-debug-apk
+路径: android/app/build/outputs/apk/debug/app-debug.apk
         retention-days: 30

@@ -18,6 +18,11 @@
     - 分布: 跑
 用途；使用；用法: actions/setup-java@v4
 与:
+    - name: 解压 Android 项目
+      run: |
+        tar -xzf openclaw-android-0.3.0.tar.gz
+        # 或者解压修复版
+        # tar -xzf openclaw-android-0.3.0-fix1.tar.gz
         java-version: '17'
 分布: 'temurin'
         

@@ -17,11 +17,30 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 解压完整代码
-        run: tar -xzf openclaw-android-0.3.0-final-complete.tar.gz
+        run: |
+          if [ -f "openclaw-android-0.3.0-final-complete.tar.gz" ]; then
+            tar -xzf openclaw-android-0.3.0-final-complete.tar.gz
+          elif [ -f "openclaw-android-0.3.0-complete-with-workflow.tar.gz" ]; then
+            tar -xzf openclaw-android-0.3.0-complete-with-workflow.tar.gz
+          elif [ -f "openclaw-android-0.3.0-fixed-complete.tar.gz" ]; then
+            tar -xzf openclaw-android-0.3.0-fixed-complete.tar.gz
+          else
+            echo "未找到压缩包文件，直接使用检出代码"
+          fi
 
       - name: 查看解压后的目录结构
         run: |
-          echo "=== 当前目录结构 ===" && ls -la
+          echo "=== 当前目录结构 ==="
+          ls -la
+          echo ""
+          echo "=== 检查android目录 ==="
+          if [ -d "openclaw-android-0.3.0/android" ]; then
+            echo "找到: openclaw-android-0.3.0/android"
+          elif [ -d "android" ]; then
+            echo "找到: android"
+          else
+            echo "未找到android目录"
+          fi
 
       - name: 设置 JDK 17
         uses: actions/setup-java@v4
@@ -31,7 +50,11 @@ jobs:
 
       - name: 授予 Gradle 执行权限
         run: |
-          chmod +x openclaw-android-0.3.0/android/gradlew
+          if [ -f "openclaw-android-0.3.0/android/gradlew" ]; then
+            chmod +x openclaw-android-0.3.0/android/gradlew
+          elif [ -f "android/gradlew" ]; then
+            chmod +x android/gradlew
+          fi
 
       - name: 缓存 Gradle 依赖
         uses: actions/cache@v4
@@ -45,15 +68,26 @@ jobs:
 
       - name: 构建 Debug APK
         run: |
-          cd openclaw-android-0.3.0/android
-          ./gradlew assembleDebug --stacktrace
+          if [ -d "openclaw-android-0.3.0/android" ]; then
+            cd openclaw-android-0.3.0/android
+            ./gradlew assembleDebug --stacktrace
+          elif [ -d "android" ]; then
+            cd android
+            ./gradlew assembleDebug --stacktrace
+          else
+            echo "错误：未找到android目录"
+            exit 1
+          fi
 
       - name: 上传 Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: openclaw-android-debug-apk
-          path: openclaw-android-0.3.0/android/app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            openclaw-android-0.3.0/android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
           retention-days: 30
+          if-no-files-found: warn
 
       - name: 显示构建结果摘要
         if: always()

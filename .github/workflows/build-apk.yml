@@ -5,7 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -16,9 +16,13 @@ jobs:
     - name: 检出代码
       uses: actions/checkout@v4
       
-    - name: 解压修复后的代码
-      run: tar -xzf openclaw-android-0.3.0-fix1.tar.gz
+    - name: 解压完整代码
+      run: tar -xzf openclaw-android-0.3.0-complete-with-workflow.tar.gz
       
+    - name: 查看解压后的目录结构
+      run: |
+        echo "=== 当前目录结构 ===" && ls -la
+        
     - name: 设置 JDK 17
       uses: actions/setup-java@v4
       with:
@@ -51,30 +55,9 @@ jobs:
         path: openclaw-android-0.3.0/android/app/build/outputs/apk/debug/app-debug.apk
         retention-days: 30
         
-    - name: 构建 Release APK（如果配置了签名）
-      run: |
-        cd openclaw-android-0.3.0/android
-        ./gradlew assembleRelease --stacktrace
-      continue-on-error: true  # 如果没有签名配置，跳过此步骤
-        
-    - name: 上传 Release APK
-      if: success()
-      uses: actions/upload-artifact@v4
-      with:
-        name: openclaw-android-release-apk
-        path: openclaw-android-0.3.0/android/app/build/outputs/apk/release/app-release.apk
-        retention-days: 30
-      continue-on-error: true
-        
     - name: 显示构建结果摘要
       if: always()
       run: |
         echo "## 构建结果 📦" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "- **Debug APK**: 已上传到 Artifacts" >> $GITHUB_STEP_SUMMARY
-        echo "- **Release APK**: $([ -f openclaw-android-0.3.0/android/app/build/outputs/apk/release/app-release.apk ] && echo "已上传" || echo "未生成（可能缺少签名配置）")" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "下载方式：" >> $GITHUB_STEP_SUMMARY
-        echo "1. 进入 Actions 页面" >> $GITHUB_STEP_SUMMARY
-        echo "2. 点击对应的 workflow run" >> $GITHUB_STEP_SUMMARY
-        echo "3. 滚动到底部，在 Artifacts 区域下载 APK" >> $GITHUB_STEP_SUMMARY

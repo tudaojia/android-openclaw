@@ -17,7 +17,7 @@ jobs:
       uses: actions/checkout@v4
       
     - name: 解压完整代码
-      run: tar -xzf openclaw-android-0.3.0-complete-with-workflow.tar.gz
+      run: tar -xzf openclaw-android-0.3.0-fixed-complete.tar.gz
       
     - name: 查看解压后的目录结构
       run: |

@@ -34,8 +34,7 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: 授予 Gradle 执行权限
-        run: |
-          chmod +x claw/android/gradlew
+        run: chmod +x claw/android/gradlew
 
       - name: 构建 Debug APK
         run: |

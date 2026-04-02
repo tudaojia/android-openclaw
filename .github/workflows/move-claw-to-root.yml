@@ -1,0 +1,85 @@
+name: Move Claw to Root
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  move:
+    name: Move claw contents to root
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Check if claw directory exists
+        id: check
+        run: |
+          if [ -d "claw" ]; then
+            echo "✓ claw directory found"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "✗ claw directory not found"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Move claw contents to root
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          echo "当前目录结构:"
+          ls -la
+          
+          echo ""
+          echo "claw 目录内容:"
+          ls -la claw/
+          
+          echo ""
+          echo "移动 claw 目录内容到根目录..."
+          
+          # 移动 claw 目录中的所有内容到根目录
+          # 使用 cp 而不是 mv，避免跨文件系统问题
+          cp -r claw/* .
+          cp -r claw/.* . 2>/dev/null || true
+          
+          echo ""
+          echo "删除 claw 目录..."
+          rm -rf claw
+          
+          echo ""
+          echo "移动后的目录结构:"
+          ls -la
+      
+      - name: Configure Git
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Commit and push changes
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          git add -A
+          git status
+          
+          if git diff --staged --quiet; then
+            echo "没有变更需要提交"
+          else
+            git commit -m "Move claw contents to repository root [skip ci]"
+            git push origin main
+            echo "✓ 变更已推送到仓库"
+          fi
+      
+      - name: Summary
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          echo "=== 移动完成 ==="
+          echo "claw 目录内容已移动到仓库根目录"
+          echo ""
+          echo "当前目录结构:"
+          ls -la

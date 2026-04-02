@@ -1,0 +1,77 @@
+name: Unzip Claw
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'claw.zip'
+
+permissions:
+  contents: write
+
+jobs:
+  unzip:
+    name: Unzip claw.zip to repository
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      
+      - name: Check if claw.zip exists
+        id: check
+        run: |
+          if [ -f "claw.zip" ]; then
+            echo "✓ claw.zip found"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "✗ claw.zip not found"
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Unzip claw.zip
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          echo "解压 claw.zip..."
+          unzip -o claw.zip
+          echo "✓ 解压完成"
+          
+          echo "删除 claw.zip..."
+          rm -f claw.zip
+          echo "✓ claw.zip 已删除"
+          
+          echo "当前目录内容:"
+          ls -la
+      
+      - name: Configure Git
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      
+      - name: Commit and push changes
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          git add -A
+          git status
+          
+          if git diff --staged --quiet; then
+            echo "没有变更需要提交"
+          else
+            git commit -m "Unzip claw.zip to repository root [skip ci]"
+            git push origin main
+            echo "✓ 变更已推送到仓库"
+          fi
+      
+      - name: Summary
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          echo "=== 解压完成 ==="
+          echo "文件已解压到仓库根目录"
+          echo ""
+          echo "目录结构:"
+          find . -maxdepth 2 -type d | head -20

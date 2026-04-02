@@ -77,7 +77,7 @@ class MainActivity : AppCompatActivity() {
             } else if (intent?.getBooleanExtra("from_boot", false) == true) {
                 val platformFile = java.io.File(bootstrapManager.homeDir, ".openclaw-android/.platform")
                 val platformId = if (platformFile.exists()) platformFile.readText().trim() else "openclaw"
-                Log.i(TAG, "Boot launch \u2014 auto-starting $platformId gateway")
+                Log.i(TAG, "Boot launch — auto-starting $platformId gateway")
                 binding.terminalView.post {
                     session.write("$platformId gateway\n")
                 }
@@ -92,19 +92,11 @@ class MainActivity : AppCompatActivity() {
         binding.terminalView.setTerminalViewClient(terminalViewClient)
         binding.terminalView.setTextSize(currentTextSize)
         
-        // Bug Fix 1: 启用自动换行并动态设置列宽
-        val displayMetrics = resources.displayMetrics
-        val screenWidth = displayMetrics.widthPixels
-        // 计算列宽：屏幕宽度 / 字体大小 * 0.9 (留出边距)
-        val estimatedCharWidth = currentTextSize * 0.6f
-        val columns = ((screenWidth / estimatedCharWidth) * 0.9f).toInt().coerceAtLeast(40)
+        // Note: TerminalView automatically calculates columns and rows based on view size
+        // The setColumns() and setEmulator() methods do not exist in TerminalView API
+        // Column/row calculation is handled internally by updateSize() when the view is laid out
         
-        binding.terminalView.setColumns(columns)
-        
-        // 确保终端模拟器启用自动换行
-        binding.terminalView.setEmulator(80, 24)  // 初始值，会动态调整
-        
-        Log.i(TAG, "Terminal configured: columns=$columns, textSize=$currentTextSize")
+        Log.i(TAG, "Terminal configured: textSize=$currentTextSize")
     }
 
     // --- WebView setup ---

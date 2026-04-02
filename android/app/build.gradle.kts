@@ -103,6 +103,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.gson)
     // WebView + @JavascriptInterface — Android SDK built-in, no extra dependency
+    
+    // Security: Rate limiting for command execution
+    implementation("com.google.guava:guava:33.0.0-android")
 }
 
 detekt {

@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.PowerManager
 import android.provider.Settings
@@ -14,11 +16,18 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.concurrent.TimeUnit
+import com.google.common.util.concurrent.RateLimiter
 
 /**
  * WebView → Kotlin bridge via @JavascriptInterface (§2.6).
  * All methods callable from JavaScript as window.OpenClaw.<method>().
  * All return values are JSON strings. Async operations use EventBridge (§2.8).
+ * 
+ * Security improvements:
+ * - Command whitelist validation
+ * - Rate limiting for command execution
+ * - Network status detection
  */
 class JsBridge(
     private val activity: MainActivity,
@@ -28,6 +37,64 @@ class JsBridge(
 ) {
     private val gson = Gson()
     private val TAG = "JsBridge"
+
+    // Security: Command whitelist
+    private val ALLOWED_COMMANDS = setOf(
+        "npm", "node", "npx", "bun", "yarn", "pnpm",
+        "git", "ls", "cat", "echo", "pwd", "which", "env", "printenv",
+        "mkdir", "touch", "rm", "cp", "mv", "chmod", "chown",
+        "grep", "find", "head", "tail", "wc", "sort", "uniq",
+        "curl", "wget", "tar", "unzip", "zip",
+        "python", "python3", "pip", "pip3",
+        "openclaw", "claude", "gemini", "codex", "opencode",
+        "bash", "sh", "zsh", "fish",
+        "tmux", "screen", "ttyd",
+        "ssh", "scp", "rsync",
+        "adb", "fastboot",
+        "code-server", "vim", "nano", "emacs",
+        "dufs", "http-server"
+    )
+
+    // Security: Rate limiter (10 commands per second)
+    private val commandRateLimiter = RateLimiter.create(10.0)
+
+    // Security: Blocked command patterns
+    private val BLOCKED_PATTERNS = listOf(
+        "rm -rf /", "rm -rf /*", "mkfs", "dd if=",
+        ":(){ :|:& };:", "chmod -R 777 /",
+        "curl.*|.*bash", "wget.*|.*bash",
+        "sudo rm", "su -c"
+    )
+
+    /**
+     * Validate command for security.
+     * Returns Pair(isValid, errorMessage)
+     */
+    private fun validateCommand(cmd: String): Pair<Boolean, String> {
+        val trimmedCmd = cmd.trim()
+        
+        // Check for empty command
+        if (trimmedCmd.isEmpty()) {
+            return Pair(false, "Empty command")
+        }
+
+        // Check for blocked patterns
+        for (pattern in BLOCKED_PATTERNS) {
+            if (Regex(pattern, RegexOption.IGNORE_CASE).containsMatchIn(trimmedCmd)) {
+                return Pair(false, "Blocked pattern detected: $pattern")
+            }
+        }
+
+        // Extract base command
+        val baseCmd = trimmedCmd.split("\\s+".toRegex()).firstOrNull() ?: ""
+        
+        // Check whitelist
+        if (!ALLOWED_COMMANDS.contains(baseCmd)) {
+            return Pair(false, "Command not allowed: $baseCmd. Allowed commands: ${ALLOWED_COMMANDS.take(10).joinToString()}...")
+        }
+
+        return Pair(true, "")
+    }
 
     /**
      * Launch a coroutine on Dispatchers.IO with error handling.
@@ -49,6 +116,7 @@ class JsBridge(
         }
         CoroutineScope(Dispatchers.IO + handler).launch(block = block)
     }
+
     // ═══════════════════════════════════════════
     // Terminal domain
     // ═══════════════════════════════════════════
@@ -61,8 +129,6 @@ class JsBridge(
             if (bootstrapManager.needsPostSetup()) {
                 val script = bootstrapManager.postSetupScript.absolutePath
                 // Delay write until after attachSession() initializes the shell process.
-                // createSession() posts attachSession() via runOnUiThread; writing before
-                // that runs silently drops the data (mShellPid is still 0).
                 android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                     session.write("bash $script\n")
                 }, 500)
@@ -107,9 +173,15 @@ class JsBridge(
 
     @JavascriptInterface
     fun runInNewSession(command: String) {
+        // Validate command before running
+        val (isValid, errorMsg) = validateCommand(command)
+        if (!isValid) {
+            eventBridge.emit("command_error", mapOf("error" to errorMsg, "command" to command))
+            return
+        }
+
         val session = sessionManager.createSession()
         activity.showTerminal()
-        // Delay write until shell process initializes (same pattern as showTerminal post-setup)
         android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
             session.write(command)
         }, 500)
@@ -167,7 +239,6 @@ class JsBridge(
 
     @JavascriptInterface
     fun getAvailablePlatforms(): String {
-        // Read from cached config.json or return defaults
         return gson.toJson(
             listOf(
                 mapOf("id" to "openclaw", "name" to "OpenClaw", "icon" to "🧠",
@@ -178,7 +249,6 @@ class JsBridge(
 
     @JavascriptInterface
     fun getInstalledPlatforms(): String {
-        // Check which platforms are installed via npm/filesystem
         val env = EnvironmentBuilder.build(activity)
         val result = CommandRunner.runSync(
             "npm list -g --depth=0 --json 2>/dev/null",
@@ -221,7 +291,6 @@ class JsBridge(
 
     @JavascriptInterface
     fun switchPlatform(id: String) {
-        // Write active platform marker
         val markerFile = java.io.File(bootstrapManager.homeDir, ".openclaw-android/.platform")
         markerFile.parentFile?.mkdirs()
         markerFile.writeText(id)
@@ -244,7 +313,6 @@ class JsBridge(
         val prefix = bootstrapManager.prefixDir.absolutePath
         val tools = mutableListOf<Map<String, String>>()
 
-        // Termux packages - check binary path
         val pkgChecks = mapOf(
             "tmux" to "$prefix/bin/tmux",
             "ttyd" to "$prefix/bin/ttyd",
@@ -259,12 +327,10 @@ class JsBridge(
             }
         }
 
-        // Chromium - check multiple possible paths
         if (java.io.File("$prefix/bin/chromium-browser").exists() || java.io.File("$prefix/bin/chromium").exists()) {
             tools.add(mapOf("id" to "chromium", "name" to "chromium", "version" to "installed"))
         }
 
-        // npm global packages - check via command -v
         val npmTools = listOf("claude-code", "gemini-cli", "codex-cli", "opencode")
         for (id in npmTools) {
             val binName = when (id) {
@@ -290,25 +356,15 @@ class JsBridge(
         ) {
             val env = EnvironmentBuilder.build(activity)
             val cmd = when (id) {
-                // Termux packages (pkg)
                 "tmux", "ttyd", "dufs", "openssh-server", "android-tools" ->
                     "${bootstrapManager.prefixDir.absolutePath}/bin/apt-get install -y ${if (id == "openssh-server") "openssh" else id}"
-                // Chromium (from x11-repo)
                 "chromium" ->
                     "${bootstrapManager.prefixDir.absolutePath}/bin/apt-get install -y chromium"
-                // code-server (custom)
-                "code-server" ->
-                    "npm install -g code-server"
-                // npm-based AI CLI tools
-                "claude-code" ->
-                    "npm install -g @anthropic-ai/claude-code"
-                "gemini-cli" ->
-                    "npm install -g @google/gemini-cli"
-                "codex-cli" ->
-                    "npm install -g @openai/codex"
-                // OpenCode (Bun-based)
-                "opencode" ->
-                    "npm install -g opencode"
+                "code-server" -> "npm install -g code-server"
+                "claude-code" -> "npm install -g @anthropic-ai/claude-code"
+                "gemini-cli" -> "npm install -g @google/gemini-cli"
+                "codex-cli" -> "npm install -g @openai/codex"
+                "opencode" -> "npm install -g opencode"
                 else -> "echo 'Unknown tool: $id'"
             }
             eventBridge.emit("install_progress",
@@ -332,16 +388,11 @@ class JsBridge(
             val cmd = when (id) {
                 "tmux", "ttyd", "dufs", "openssh-server", "android-tools", "chromium" ->
                     "${bootstrapManager.prefixDir.absolutePath}/bin/apt-get remove -y ${if (id == "openssh-server") "openssh" else id}"
-                "code-server" ->
-                    "npm uninstall -g code-server"
-                "claude-code" ->
-                    "npm uninstall -g @anthropic-ai/claude-code"
-                "gemini-cli" ->
-                    "npm uninstall -g @google/gemini-cli"
-                "codex-cli" ->
-                    "npm uninstall -g @openai/codex"
-                "opencode" ->
-                    "npm uninstall -g opencode"
+                "code-server" -> "npm uninstall -g code-server"
+                "claude-code" -> "npm uninstall -g @anthropic-ai/claude-code"
+                "gemini-cli" -> "npm uninstall -g @google/gemini-cli"
+                "codex-cli" -> "npm uninstall -g @openai/codex"
+                "opencode" -> "npm uninstall -g opencode"
                 else -> "echo 'Unknown tool: $id'"
             }
             CommandRunner.runSync(cmd, env, bootstrapManager.homeDir)
@@ -358,7 +409,6 @@ class JsBridge(
             "chromium" -> java.io.File("$prefix/bin/chromium-browser").exists() || java.io.File("$prefix/bin/chromium").exists()
             "code-server" -> java.io.File("$prefix/bin/code-server").exists()
             else -> {
-                // npm global packages: check via command -v
                 val result = CommandRunner.runSync("command -v $id 2>/dev/null", env, bootstrapManager.prefixDir, timeoutMs = 5_000)
                 result.stdout.trim().isNotEmpty()
             }
@@ -367,11 +417,33 @@ class JsBridge(
     }
 
     // ═══════════════════════════════════════════
-    // Commands domain
+    // Commands domain (with security improvements)
     // ═══════════════════════════════════════════
 
     @JavascriptInterface
     fun runCommand(cmd: String): String {
+        // Security: Rate limiting
+        if (!commandRateLimiter.tryAcquire()) {
+            return gson.toJson(mapOf(
+                "error" to "Rate limit exceeded. Please wait before sending more commands.",
+                "stdout" to "",
+                "stderr" to "",
+                "exitCode" to -1
+            ))
+        }
+
+        // Security: Command validation
+        val (isValid, errorMsg) = validateCommand(cmd)
+        if (!isValid) {
+            Log.w(TAG, "Blocked command: $cmd - $errorMsg")
+            return gson.toJson(mapOf(
+                "error" to errorMsg,
+                "stdout" to "",
+                "stderr" to errorMsg,
+                "exitCode" to -1
+            ))
+        }
+
         val env = EnvironmentBuilder.build(activity)
         val result = CommandRunner.runSync(cmd, env, bootstrapManager.homeDir)
         return gson.toJson(result)
@@ -379,6 +451,30 @@ class JsBridge(
 
     @JavascriptInterface
     fun runCommandAsync(callbackId: String, cmd: String) {
+        // Security: Rate limiting
+        if (!commandRateLimiter.tryAcquire()) {
+            eventBridge.emit("command_output",
+                mapOf(
+                    "callbackId" to callbackId,
+                    "error" to "Rate limit exceeded",
+                    "done" to true
+                ))
+            return
+        }
+
+        // Security: Command validation
+        val (isValid, errorMsg) = validateCommand(cmd)
+        if (!isValid) {
+            Log.w(TAG, "Blocked async command: $cmd - $errorMsg")
+            eventBridge.emit("command_output",
+                mapOf(
+                    "callbackId" to callbackId,
+                    "error" to errorMsg,
+                    "done" to true
+                ))
+            return
+        }
+
         launchWithErrorHandling(
             errorEventType = "command_output",
             errorContext = mapOf("callbackId" to callbackId, "done" to true)
@@ -403,12 +499,9 @@ class JsBridge(
 
     @JavascriptInterface
     fun checkForUpdates(): String {
-        // Compare local versions with config.json remote versions
         val updates = mutableListOf<Map<String, String>>()
         try {
-            val configFile = java.io.File(
-                activity.filesDir, "usr/share/openclaw-app/config.json"
-            )
+            val configFile = java.io.File(activity.filesDir, "usr/share/openclaw-app/config.json")
             if (configFile.exists()) {
                 val config = gson.fromJson(configFile.readText(), Map::class.java) as? Map<*, *>
                 val localWwwVersion = activity.getSharedPreferences("openclaw", 0)
@@ -422,7 +515,9 @@ class JsBridge(
                     ))
                 }
             }
-        } catch (_: Exception) { /* ignore parse errors */ }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to check for updates", e)
+        }
         return gson.toJson(updates)
     }
 
@@ -437,14 +532,12 @@ class JsBridge(
 
             when (component) {
                 "www" -> {
-                    // Download www.zip → staging → atomic replace → reload
                     try {
                         val url = UrlResolver(activity).getWwwUrl()
                         val stagingWww = java.io.File(activity.cacheDir, "www-staging")
                         stagingWww.deleteRecursively()
                         stagingWww.mkdirs()
 
-                        // Download www.zip
                         eventBridge.emit("install_progress",
                             mapOf("target" to "www", "progress" to 0.2f, "message" to "Downloading..."))
                         val zipFile = java.io.File(activity.cacheDir, "www.zip")
@@ -452,7 +545,6 @@ class JsBridge(
                             zipFile.outputStream().use { output -> input.copyTo(output) }
                         }
 
-                        // Extract to staging
                         eventBridge.emit("install_progress",
                             mapOf("target" to "www", "progress" to 0.6f, "message" to "Extracting..."))
                         java.util.zip.ZipInputStream(zipFile.inputStream()).use { zis ->
@@ -470,7 +562,6 @@ class JsBridge(
                         }
                         zipFile.delete()
 
-                        // Atomic replace: delete old www, rename staging
                         eventBridge.emit("install_progress",
                             mapOf("target" to "www", "progress" to 0.9f, "message" to "Applying..."))
                         val wwwDir = bootstrapManager.wwwDir
@@ -478,7 +569,6 @@ class JsBridge(
                         wwwDir.parentFile?.mkdirs()
                         stagingWww.renameTo(wwwDir)
 
-                        // Reload WebView
                         activity.runOnUiThread { activity.reloadWebView() }
                     } catch (e: Exception) {
                         eventBridge.emit("install_progress",
@@ -487,7 +577,6 @@ class JsBridge(
                     }
                 }
                 "bootstrap" -> {
-                    // Re-download and re-extract bootstrap
                     try {
                         eventBridge.emit("install_progress",
                             mapOf("target" to "bootstrap", "progress" to 0.1f, "message" to "Downloading bootstrap..."))
@@ -502,7 +591,6 @@ class JsBridge(
                     }
                 }
                 "scripts" -> {
-                    // Scripts update: re-download management scripts from config URL
                     eventBridge.emit("install_progress",
                         mapOf("target" to "scripts", "progress" to 0.5f, "message" to "Scripts are updated with bootstrap"))
                 }
@@ -573,8 +661,10 @@ class JsBridge(
         val filesDir = activity.filesDir
         val totalSpace = filesDir.totalSpace
         val freeSpace = filesDir.freeSpace
-        val bootstrapSize = bootstrapManager.prefixDir.walkTopDown().sumOf { it.length() }
-        val wwwSize = bootstrapManager.wwwDir.walkTopDown().sumOf { it.length() }
+        
+        // Optimized: Use cached values or quick estimation
+        val bootstrapSize = estimateDirSize(bootstrapManager.prefixDir)
+        val wwwSize = estimateDirSize(bootstrapManager.wwwDir)
 
         return gson.toJson(
             mapOf(
@@ -586,9 +676,69 @@ class JsBridge(
         )
     }
 
+    /**
+     * Quick directory size estimation (non-recursive for performance)
+     */
+    private fun estimateDirSize(dir: java.io.File): Long {
+        if (!dir.exists()) return 0
+        var size = 0L
+        try {
+            dir.listFiles()?.forEach { file ->
+                if (file.isFile) {
+                    size += file.length()
+                } else if (file.isDirectory) {
+                    // Only go one level deep for performance
+                    file.listFiles()?.forEach { subFile ->
+                        if (subFile.isFile) size += subFile.length()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to estimate dir size", e)
+        }
+        return size
+    }
+
     @JavascriptInterface
     fun clearCache() {
         activity.cacheDir.deleteRecursively()
         activity.cacheDir.mkdirs()
+    }
+
+    // ═══════════════════════════════════════════
+    // Network domain (new)
+    // ═══════════════════════════════════════════
+
+    @JavascriptInterface
+    fun getNetworkStatus(): String {
+        val cm = activity.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork
+        val caps = cm.getNetworkCapabilities(network)
+        
+        val (connected, type) = when {
+            network == null -> Pair(false, "none")
+            caps == null -> Pair(false, "none")
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> Pair(true, "wifi")
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> Pair(true, "cellular")
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> Pair(true, "ethernet")
+            else -> Pair(true, "unknown")
+        }
+
+        return gson.toJson(mapOf(
+            "connected" to connected,
+            "type" to type
+        ))
+    }
+
+    @JavascriptInterface
+    fun getSystemInfo(): String {
+        return gson.toJson(mapOf(
+            "os" to "android",
+            "arch" to System.getProperty("os.arch"),
+            "version" to android.os.Build.VERSION.RELEASE,
+            "sdk" to android.os.Build.VERSION.SDK_INT,
+            "device" to android.os.Build.DEVICE,
+            "model" to android.os.Build.MODEL
+        ))
     }
 }

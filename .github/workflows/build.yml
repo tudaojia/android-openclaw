@@ -1,4 +1,4 @@
-name: Build Claw APK
+name: Build Android APK
 
 on:
   push:
@@ -6,36 +6,51 @@ on:
   pull_request:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
 
 # 解决 Node.js 20 弃用警告
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true"
 
 jobs:
   build:
     name: Build APK
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - name: 验证项目结构
         run: |
-          echo "当前目录结构:"
+          echo "=== 项目结构验证 ==="
+          echo ""
+          echo "根目录内容:"
           ls -la
           
           echo ""
           echo "Android 目录内容:"
-          ls -la android/ 2>/dev/null || echo "android 目录不存在"
+          ls -la android/ || echo "android 目录不存在"
           
-          # 检查 build.gradle 是否存在
-          if [ -f "android/build.gradle" ] || [ -f "android/build.gradle.kts" ]; then
-            echo "✓ 找到 Android 项目配置文件"
-          else
-            echo "✗ 未找到 build.gradle 或 build.gradle.kts"
-            find . -name "build.gradle*" 2>/dev/null | head -10
-          fi
+          # 检查关键文件
+          echo ""
+          echo "关键文件检查:"
+          test -f "android/build.gradle.kts" && echo "✓ build.gradle.kts 存在" || echo "✗ build.gradle.kts 不存在"
+          test -f "android/settings.gradle.kts" && echo "✓ settings.gradle.kts 存在" || echo "✗ settings.gradle.kts 不存在"
+          test -f "android/gradlew" && echo "✓ gradlew 存在" || echo "✗ gradlew 不存在"
+          test -f "android/app/build.gradle.kts" && echo "✓ app/build.gradle.kts 存在" || echo "✗ app/build.gradle.kts 不存在"
       
       - name: 设置 JDK 21
         uses: actions/setup-java@v4
@@ -49,39 +64,101 @@ jobs:
       
       - name: 授予 Gradle 执行权限
         run: |
-          chmod +x android/gradlew 2>/dev/null || true
-          chmod +x gradlew 2>/dev/null || true
+          chmod +x android/gradlew
           echo "✓ Gradle 权限已设置"
       
-      - name: 构建 Debug APK
+      - name: 缓存 Gradle 依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            android/.gradle
+          key: ${{ runner.os }}-gradle-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      
+      - name: 验证 Gradle 配置
         run: |
           cd android
-          echo "构建目录: $(pwd)"
-          echo "目录内容:"
-          ls -la
+          echo "Gradle 版本:"
+          ./gradlew --version
           
-          ./gradlew assembleDebug --stacktrace --no-daemon --info
+          echo ""
+          echo "项目配置:"
+          ./gradlew projects
       
-      - name: 查找 APK 文件
+      - name: 构建 Debug APK
+        if: github.event.inputs.build_type != 'release'
         run: |
-          echo "查找生成的 APK 文件..."
+          cd android
+          echo "=== 构建 Debug APK ==="
+          ./gradlew assembleDebug --stacktrace --info
+          
+          echo ""
+          echo "=== 查找生成的 APK ==="
           find . -name "*.apk" -type f 2>/dev/null
       
+      - name: 构建 Release APK
+        if: github.event.inputs.build_type == 'release'
+        run: |
+          cd android
+          echo "=== 构建 Release APK ==="
+          ./gradlew assembleRelease --stacktrace --info
+          
+          echo ""
+          echo "=== 查找生成的 APK ==="
+          find . -name "*.apk" -type f 2>/dev/null
+        env:
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+      
       - name: 上传 Debug APK
+        if: github.event.inputs.build_type != 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: claw-debug-apk
+          name: openclaw-debug-apk
           path: |
             android/app/build/outputs/apk/debug/*.apk
-            **/build/outputs/apk/debug/*.apk
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
+      
+      - name: 上传 Release APK
+        if: github.event.inputs.build_type == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openclaw-release-apk
+          path: |
+            android/app/build/outputs/apk/release/*.apk
+          retention-days: 90
+          if-no-files-found: error
+      
+      - name: 生成构建摘要
+        run: |
+          echo "=== 构建摘要 ==="
+          echo "构建类型: ${{ github.event.inputs.build_type || 'debug' }}"
+          echo "分支: ${{ github.ref_name }}"
+          echo "提交: ${{ github.sha }}"
+          echo ""
+          
+          if [ "${{ github.event.inputs.build_type }}" != "release" ]; then
+            APK_PATH=$(find android -name "app-debug.apk" 2>/dev/null | head -1)
+          else
+            APK_PATH=$(find android -name "app-release.apk" 2>/dev/null | head -1)
+          fi
+          
+          if [ -n "$APK_PATH" ]; then
+            echo "APK 路径: $APK_PATH"
+            echo "APK 大小: $(du -h "$APK_PATH" | cut -f1)"
+            echo "APK MD5: $(md5sum "$APK_PATH" | cut -d' ' -f1)"
+          fi
 
   lint:
     name: Lint Check
     runs-on: ubuntu-latest
     needs: build
-    if: always()
+    if: always() && needs.build.result == 'success'
     
     steps:
       - uses: actions/checkout@v4
@@ -97,18 +174,106 @@ jobs:
         uses: android-actions/setup-android@v3
       
       - name: 授予 Gradle 执行权限
-        run: chmod +x android/gradlew 2>/dev/null || true
+        run: chmod +x android/gradlew
       
       - name: 运行 Lint
         run: |
           cd android
           ./gradlew lint || true
       
-      - uses: actions/upload-artifact@v4
+      - name: 上传 Lint 报告
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: lint-results
+          name: lint-report
           path: |
-            android/app/build/reports/lint-results.*
-            **/build/reports/**/*.html
+            android/app/build/reports/lint-results*.html
+            android/app/build/reports/lint-results*.xml
           if-no-files-found: ignore
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: build
+    if: always() && needs.build.result == 'success'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 设置 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+      
+      - name: 设置 Android SDK
+        uses: android-actions/setup-android@v3
+      
+      - name: 授予 Gradle 执行权限
+        run: chmod +x android/gradlew
+      
+      - name: 运行单元测试
+        run: |
+          cd android
+          ./gradlew test || true
+      
+      - name: 上传测试报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report
+          path: |
+            android/app/build/reports/tests/
+          if-no-files-found: ignore
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build, lint, test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.build.result == 'success'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: 下载 Debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: openclaw-debug-apk
+          path: ./apk
+      
+      - name: 获取版本信息
+        id: version
+        run: |
+          VERSION=$(date +'%Y.%m.%d')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION-$(echo ${{ github.sha }} | cut -c1-7)" >> $GITHUB_OUTPUT
+      
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: OpenClaw Android ${{ steps.version.outputs.version }}
+          body: |
+            ## OpenClaw Android App
+            
+            ### 构建信息
+            - 构建类型: Debug
+            - 分支: ${{ github.ref_name }}
+            - 提交: ${{ github.sha }}
+            
+            ### 下载
+            下载下方的 APK 文件安装到您的 Android 设备。
+            
+            ### 系统要求
+            - Android 7.0+ (API 24+)
+            - 约 200MB 存储空间
+            
+            ### 更新日志
+            查看 [commits](https://github.com/${{ github.repository }}/commits/main) 获取详细更新内容。
+          files: |
+            apk/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

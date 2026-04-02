@@ -16,8 +16,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.util.concurrent.TimeUnit
-import com.google.common.util.concurrent.RateLimiter
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * WebView → Kotlin bridge via @JavascriptInterface (§2.6).
@@ -55,8 +54,8 @@ class JsBridge(
         "dufs", "http-server"
     )
 
-    // Security: Rate limiter (10 commands per second)
-    private val commandRateLimiter = RateLimiter.create(10.0)
+    // Security: Simple rate limiter (10 commands per second)
+    private val commandRateLimiter = SimpleRateLimiter(10.0)
 
     // Security: Blocked command patterns
     private val BLOCKED_PATTERNS = listOf(
@@ -65,6 +64,42 @@ class JsBridge(
         "curl.*|.*bash", "wget.*|.*bash",
         "sudo rm", "su -c"
     )
+
+    /**
+     * Simple rate limiter implementation without external dependencies.
+     * Uses token bucket algorithm.
+     */
+    private class SimpleRateLimiter(private val permitsPerSecond: Double) {
+        private val lastRefillTime = AtomicLong(System.nanoTime())
+        private val availablePermits = AtomicLong((permitsPerSecond * 1_000_000_000).toLong())
+        private val maxPermits = (permitsPerSecond * 1_000_000_000).toLong()
+
+        fun tryAcquire(): Boolean {
+            refill()
+            while (true) {
+                val current = availablePermits.get()
+                if (current <= 0) return false
+                if (availablePermits.compareAndSet(current, current - 1_000_000_000L)) {
+                    return true
+                }
+            }
+        }
+
+        private fun refill() {
+            val now = System.nanoTime()
+            val last = lastRefillTime.get()
+            val elapsed = now - last
+            if (elapsed > 0 && lastRefillTime.compareAndSet(last, now)) {
+                val newPermits = (elapsed * permitsPerSecond / 1_000_000_000).toLong()
+                var current: Long
+                do {
+                    current = availablePermits.get()
+                    val updated = minOf(current + newPermits, maxPermits)
+                    if (availablePermits.compareAndSet(current, updated)) break
+                } while (true)
+            }
+        }
+    }
 
     /**
      * Validate command for security.
